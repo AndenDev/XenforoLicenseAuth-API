@@ -23,10 +23,10 @@ Safeguard your XenForo-based applications and services with powerful, flexible l
 
 1️⃣ **Clone the Repository:**
 
-\```bash
+```bash
 git clone https://github.com/AndenDev/XenforoLicenseAuth-API.git
 cd XenforoLicenseAuth-API
-\```
+```
 
 2️⃣ **Configure Settings:**
 
