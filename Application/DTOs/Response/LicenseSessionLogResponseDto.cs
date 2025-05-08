@@ -1,0 +1,20 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace Application.DTOs.Response
+{
+    public class LicenseSessionLogResponseDto
+    {
+        public uint Id { get; set; }
+        public uint LicenseId { get; set; }
+        public string SessionId { get; set; } = null!;
+        public DateTime StartedAt { get; set; }
+        public DateTime? EndedAt { get; set; }
+        public string? EndedReason { get; set; }
+        public string? IpAddress { get; set; }
+        public string? Hwid { get; set; }
+    }
+}
