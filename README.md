@@ -13,15 +13,6 @@ Safeguard your XenForo-based applications and services with powerful, flexible l
 - 🛠 **User & Session Management:**  
   Track and manage user license sessions for enhanced security.
 
-- ⚡ **Token-Based Authentication:**  
-  Modern token-based access ensures secure API communications.
-
-- 🔄 **Refresh & Revoke Tokens:**  
-  Built-in support for token lifecycle management.
-
-- 📊 **Usage Logging:**  
-  Log and monitor license activations, refreshes, and errors with detailed routes.
-
 - 🚀 **XenForo Integration:**  
   Designed specifically to pair with XenForo’s user and permissions system.
 
