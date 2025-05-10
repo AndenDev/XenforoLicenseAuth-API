@@ -1,42 +1,96 @@
-﻿using System.Net;
+﻿using System.Diagnostics;
+using System.Net;
+using Domain.Enums;
 
 namespace Application.Common.Errors
 {
-    public class ApplicationError
+    /// <summary>
+    /// Represents a structured application error with standard metadata.
+    /// </summary>
+    public partial class ApplicationError
     {
-        public string Code { get; }
-        public string Message { get; }
-        public HttpStatusCode StatusCode { get; }
+        public string Title { get; }
 
-        private ApplicationError(string code, string message, HttpStatusCode statusCode)
+        public string ErrorCode { get; }
+
+        public string ErrorDescription { get; }
+
+        public string TraceId { get; }
+
+        public string CorrelationId { get; }
+
+        public ErrorType ErrorType { get; }
+
+        private ApplicationError(string title, ErrorType errorType, string errorCode, string correlationId, string errorDescription)
         {
-            Code = code;
-            Message = message;
-            StatusCode = statusCode;
+            Title = title;
+            ErrorCode = errorCode;
+            ErrorDescription = errorDescription;
+            CorrelationId = correlationId;
+            TraceId = Activity.Current?.TraceId.ToString() ?? "NoTraceId";
+            ErrorType = errorType;
         }
 
-        public static readonly ApplicationError UserNotFound = new(
-            "USER_NOT_FOUND",
-            "The specified username does not exist.",
-            HttpStatusCode.Unauthorized
-        );
+        /// <summary>
+        /// Creates a standardized error using <see cref="ErrorDetail"/>.
+        /// </summary>
+        public static ApplicationError CreateError(
+            ErrorType errorType,
+            ErrorDetail errorDetail,
+            string correlationId,
+            params object[] args
+        )
+        {
+            var formattedMessage = string.Format(errorDetail.DefaultMessage, args);
 
-        public static readonly ApplicationError InvalidAuthData = new(
-            "INVALID_AUTH_DATA",
-            "Authentication data is invalid or corrupt.",
-            HttpStatusCode.Unauthorized
-        );
+            return new ApplicationError(
+                errorDetail.Title,
+                errorType,
+                errorDetail.Code,
+                correlationId,
+                formattedMessage
+            );
+        }
+        public static ApplicationError CreateUserError(
+            ErrorDetail errorDetail,
+            string correlationId,
+            params object[] args
+        ) => CreateError(ErrorType.User, errorDetail, correlationId, args);
 
-        public static readonly ApplicationError InvalidPassword = new(
-            "INVALID_PASSWORD",
-            "The password provided is incorrect.",
-            HttpStatusCode.Unauthorized
-        );
+        public static ApplicationError CreateNotFoundError(
+            ErrorDetail errorDetail,
+            string correlationId,
+            params object[] args
+        ) => CreateError(ErrorType.NotFound, errorDetail, correlationId, args);
 
-        public static readonly ApplicationError UnauthorizedGroup = new(
-            "UNAUTHORIZED_GROUP",
-            "User does not belong to an authorized group.",
-            HttpStatusCode.Forbidden
-        );
+        public static ApplicationError CreateExceptionError(
+            ErrorDetail errorDetail,
+            string correlationId,
+            params object[] args
+        ) => CreateError(ErrorType.Exception, errorDetail, correlationId, args);
+
+        public static ApplicationError CreateConflictError(
+            ErrorDetail errorDetail,
+            string correlationId,
+            params object[] args
+        ) => CreateError(ErrorType.Conflict, errorDetail, correlationId, args);
+
+        public static ApplicationError CreateForbiddenError(
+            ErrorDetail errorDetail,
+            string correlationId,
+            params object[] args
+        ) => CreateError(ErrorType.Forbidden, errorDetail, correlationId, args);
+
+        public static ApplicationError CreateAuthenticationError(
+            ErrorDetail errorDetail,
+            string correlationId,
+            params object[] args
+        ) => CreateError(ErrorType.Authentication, errorDetail, correlationId, args);
+
+        public static ApplicationError CreateSecurityError(
+            ErrorDetail errorDetail,
+            string correlationId,
+            params object[] args
+        ) => CreateError(ErrorType.Security, errorDetail, correlationId, args);
     }
 }

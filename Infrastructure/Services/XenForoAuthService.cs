@@ -1,113 +1,295 @@
 ﻿using System.Collections;
 using System.Text;
-using Application.Interfaces;
-using Shared.Utils;
-using MySqlConnector;
-using Application.DTOs.Response;
-using MediatR;
 using System.Net;
 using System.Security.Cryptography;
-using Shared.Constant;
-using Application.Common.Results;
 using Application.Common.Errors;
-
+using Application.Common.Results;
+using Application.DTOs.Response;
+using Application.Interfaces;
+using CorrelationId.Abstractions;
+using Domain.Entities;
+using Microsoft.EntityFrameworkCore;
+using Shared.Constant;
+using Shared.Utils;
 
 namespace Infrastructure.Services
 {
     public class XenForoAuthService : IXenforoAuthService
     {
-        private readonly IMySqlDatabaseConnection _dbConnection;
-        private readonly IMediator _mediator;
+        private readonly IUnitOfWork _unitOfWork;
+        private readonly ICorrelationContextAccessor _correlationContextAccessor;
 
-        public XenForoAuthService(IMySqlDatabaseConnection dbConnection, IMediator mediator)
+        public XenForoAuthService(
+            IUnitOfWork unitOfWork,
+            ICorrelationContextAccessor correlationContextAccessor)
         {
-            _dbConnection = dbConnection;
-            _mediator = mediator;
+            _unitOfWork = unitOfWork;
+            _correlationContextAccessor = correlationContextAccessor;
         }
 
-        public async Task<Result<XenforoAuthResponseDTO>> AuthenticateUserAsync(string username, string password, string clientIp)
+        public async Task<ServiceResult<XenforoAuthResponseDTO>> AuthenticateUserAsync(string username, string password, string clientIp)
         {
-            const string userQuery = @"
-        SELECT 
-            u.user_id, 
-            u.username, 
-            u.user_group_id, 
-            ug.title AS user_group_name,
-            a.data
-        FROM xf_user u
-        JOIN xf_user_authenticate a ON a.user_id = u.user_id
-        JOIN xf_user_group ug ON u.user_group_id = ug.user_group_id
-        WHERE u.username = @username
-        LIMIT 1;
-    ";
+            var correlationId = _correlationContextAccessor?.CorrelationContext?.CorrelationId ?? Guid.NewGuid().ToString();
 
-            await using var connection = await _dbConnection.CreateOpenConnectionAsync();
+            var user = await _unitOfWork.Repository<User>()
+                .Queryable()
+                .Include(u => u.UserGroup)
+                .FirstOrDefaultAsync(u => u.Username == username);
 
-            (int userId, int userGroupId, string usernameDb, string userGroupName, string authDataStr)? userRecord = await GetUserRecordAsync(connection, username, userQuery);
+            if (user == null)
+            {
+                var error = ApplicationError.CreateNotFoundError(
+                    ErrorDefinitions.UserNotFound,
+                    correlationId,
+                    username
+                );
+                return ServiceResult<XenforoAuthResponseDTO>.NotFound(error);
+            }
 
-            if (userRecord == null)
-                return Result<XenforoAuthResponseDTO>.Fail(ApplicationError.UserNotFound);
+            var auth = await _unitOfWork.Repository<UserAuthenticate>()
+                  .GetAsync(a => a.UserId == user.UserId);
 
-            var (userId, userGroupId, usernameDb, userGroupName, authDataStr) = userRecord.Value;
+            if (auth == null)
+            {
+                var error = ApplicationError.CreateNotFoundError(
+                    ErrorDefinitions.UserNotFound,
+                    correlationId,
+                    username
+                );
+                return ServiceResult<XenforoAuthResponseDTO>.NotFound(error);
+            }
 
-            // Deserialize and verify password
+            var authDataStr = Encoding.UTF8.GetString(auth.Data);
             if (!VerifyPassword(authDataStr, password))
-                return Result<XenforoAuthResponseDTO>.Fail(ApplicationError.InvalidPassword);
+            {
+                var error = ApplicationError.CreateUserError(
+                    ErrorDefinitions.InvalidPassword,
+                    correlationId,
+                    username
+                );
+                return ServiceResult<XenforoAuthResponseDTO>.UserError(error);
+            }
 
-            // Check if user is in allowed group(s)
             var allowedGroups = new[] { XenForoUserGroups.Admin };
+            if (!allowedGroups.Contains(user.UserGroup.Title, StringComparer.OrdinalIgnoreCase))
+            {
+                var error = ApplicationError.CreateForbiddenError(
+                    ErrorDefinitions.UnauthorizedGroup,
+                    correlationId,
+                    user.UserGroup.Title
+                );
+                return ServiceResult<XenforoAuthResponseDTO>.Forbidden(error);
+            }
 
-            if (!allowedGroups.Contains(userGroupName, StringComparer.OrdinalIgnoreCase))
-                return Result<XenforoAuthResponseDTO>.Fail(ApplicationError.UnauthorizedGroup);
-
-            // Create session
-            var sessionIdBytes = GenerateSessionId();
-            var sessionIdHex = BitConverter.ToString(sessionIdBytes).Replace("-", "").ToLowerInvariant();
-
+            // Check existing session
             var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            var session = await _unitOfWork.Repository<Session>()
+                .Queryable()
+                .Where(s => s.ExpiryDate >= nowUnix)
+                .ToListAsync();
+
+            byte[]? sessionIdBytes = null;
+
+            foreach (var s in session)
+            {
+                var sessionDataBlob = Encoding.UTF8.GetString(s.SessionData);
+                if (new PHPSerializer().Deserialize(sessionDataBlob) is Hashtable sessionData
+                    && sessionData.ContainsKey("userId")
+                    && Convert.ToInt32(sessionData["userId"]) == user.UserId)
+                {
+                    sessionIdBytes = s.SessionId;
+                    break;
+                }
+            }
+
+            if (sessionIdBytes == null)
+            {
+                sessionIdBytes = GenerateSessionId();
+            }
+
             var expiryUnix = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeSeconds();
 
-            var sessionData = CreateSessionData(userId, usernameDb, userGroupId, userGroupName, clientIp, nowUnix);
+            var sessionDataObj = CreateSessionData(user.UserId, user.Username, user.UserGroupId, user.UserGroup.Title, clientIp, nowUnix);
+            var serializedSessionData = new PHPSerializer().Serialize(sessionDataObj);
 
-            var serializer = new PHPSerializer();
-            var serializedSessionData = serializer.Serialize(sessionData);
+            var sessionEntity = new Session
+            {
+                SessionId = sessionIdBytes,
+                SessionData = Encoding.UTF8.GetBytes(serializedSessionData),
+                ExpiryDate = (int)expiryUnix
+            };
 
-            await InsertOrUpdateSessionAsync(connection, sessionIdBytes, serializedSessionData, expiryUnix);
-            await InsertOrUpdateSessionActivityAsync(connection, userId, clientIp, nowUnix);
+            await _unitOfWork.Repository<Session>().AddAsync(sessionEntity);
+
+            var ipPacked = IPAddress.Parse(string.IsNullOrEmpty(clientIp) ? "0.0.0.0" : clientIp).GetAddressBytes();
+            var sessionActivity = new SessionActivity
+            {
+                UserId = user.UserId,
+                UniqueKey = ipPacked,
+                Ip = ipPacked,
+                ControllerName = "XF\\Pub\\Controller\\ForumController",
+                ControllerAction = "List",
+                ViewState = "valid",
+                RobotKey = Array.Empty<byte>(),
+                Params = Array.Empty<byte>(),
+                ViewDate = (int)nowUnix
+            };
+
+            await _unitOfWork.Repository<SessionActivity>().AddAsync(sessionActivity);
+
+            await _unitOfWork.SaveAsync();
+
+            var sessionIdHex = BitConverter.ToString(sessionIdBytes).Replace("-", "").ToLowerInvariant();
 
             var authResponse = new XenforoAuthResponseDTO
             {
                 Success = true,
                 User = new XenforoAuthResponseDTO.XenforoUserDTO
                 {
-                    UserId = userId,
-                    UserName = usernameDb,
-                    UserGroupId = userGroupId,
+                    UserId = user.UserId,
+                    UserName = user.Username,
+                    UserGroupId = user.UserGroupId,
                 },
                 SessionId = sessionIdHex
             };
 
-            return Result<XenforoAuthResponseDTO>.Ok(authResponse);
+            return ServiceResult<XenforoAuthResponseDTO>.Success(authResponse);
         }
-        private async Task<(int userId, int userGroupId, string usernameDb, string userGroupName, string authDataStr)?>
-    GetUserRecordAsync(MySqlConnection connection, string username, string userQuery)
+        public async Task<ServiceResult<object>> LogoutAsync(string sessionIdHex)
         {
-            await using var command = new MySqlCommand(userQuery, connection);
-            command.Parameters.AddWithValue("@username", username);
+            var correlationId = _correlationContextAccessor?.CorrelationContext?.CorrelationId ?? Guid.NewGuid().ToString();
+            var sessionIdBytes = HexUtils.StringToByteArray(sessionIdHex);
 
-            await using var reader = await command.ExecuteReaderAsync();
-            if (!await reader.ReadAsync())
-                return null;
+            try
+            {
+                var session = await _unitOfWork.Repository<Domain.Entities.Session>()
+                    .GetAsync(s => s.SessionId == sessionIdBytes);
 
-            var userId = reader.GetInt32("user_id");
-            var userGroupId = reader.GetInt32("user_group_id");
-            var usernameDb = reader.GetString("username");
-            var userGroupName = reader.GetString("user_group_name");
-            var authBlob = (byte[])reader["data"];
-            var authDataStr = Encoding.UTF8.GetString(authBlob);
+                if (session == null)
+                {
+                    var error = ApplicationError.CreateNotFoundError(
+                        ErrorDefinitions.SessionNotFound,
+                        correlationId,
+                        sessionIdHex
+                    );
+                    return ServiceResult<object>.NotFound(error);
+                }
+                var sessionDataBlob = Encoding.UTF8.GetString(session.SessionData);
+                var serializer = new PHPSerializer();
+                var sessionData = serializer.Deserialize(sessionDataBlob) as Hashtable;
 
-            return (userId, userGroupId, usernameDb, userGroupName, authDataStr);
+                if (sessionData == null || !sessionData.ContainsKey("userId"))
+                {
+                    var error = ApplicationError.CreateUserError(
+                        ErrorDefinitions.InvalidSession,
+                        correlationId,
+                        sessionIdHex
+                    );
+                    return ServiceResult<object>.UserError(error);
+                }
+
+                var userId = Convert.ToInt32(sessionData["userId"]);
+
+                var sessionActivity = await _unitOfWork.Repository<Domain.Entities.SessionActivity>()
+                    .GetAsync(sa => sa.UserId == userId);
+
+                if (sessionActivity != null)
+                {
+                    _unitOfWork.Repository<Domain.Entities.SessionActivity>().Delete(sessionActivity);
+                }
+
+                _unitOfWork.Repository<Domain.Entities.Session>().Delete(session);
+                await _unitOfWork.SaveAsync();
+
+                return ServiceResult<object>.Success(null);
+            }
+            catch (Exception ex)
+            {
+                var error = ApplicationError.CreateExceptionError(
+                    ErrorDefinitions.InternalServerError,
+                    correlationId,
+                    ex.Message
+                );
+                return ServiceResult<object>.Exception(error);
+            }
         }
+        public async Task<ServiceResult<XenforoAuthResponseDTO>> ValidateSessionAsync(string sessionIdHex, string clientIp)
+        {
+            var correlationId = _correlationContextAccessor?.CorrelationContext?.CorrelationId ?? Guid.NewGuid().ToString();
+            var sessionIdBytes = HexUtils.StringToByteArray(sessionIdHex);
+            var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+
+            try
+            {
+                var session = await _unitOfWork.Repository<Domain.Entities.Session>()
+                    .GetAsync(s => s.SessionId == sessionIdBytes);
+
+                if (session == null)
+                {
+                    var error = ApplicationError.CreateNotFoundError(
+                        ErrorDefinitions.SessionNotFound,
+                        correlationId,
+                        sessionIdHex
+                    );
+                    return ServiceResult<XenforoAuthResponseDTO>.NotFound(error);
+                }
+
+                if (session.ExpiryDate < nowUnix)
+                {
+                    var error = ApplicationError.CreateUserError(
+                        ErrorDefinitions.SessionExpired,
+                        correlationId,
+                        sessionIdHex
+                    );
+                    return ServiceResult<XenforoAuthResponseDTO>.UserError(error);
+                }
+
+                var serializer = new PHPSerializer();
+                var sessionDataBlob = Encoding.UTF8.GetString(session.SessionData);
+                var sessionData = serializer.Deserialize(sessionDataBlob) as Hashtable;
+
+                if (sessionData == null || !sessionData.ContainsKey("userId"))
+                {
+                    var error = ApplicationError.CreateUserError(
+                        ErrorDefinitions.InvalidSession,
+                        correlationId,
+                        sessionIdHex
+                    );
+                    return ServiceResult<XenforoAuthResponseDTO>.UserError(error);
+                }
+
+                var userId = Convert.ToInt32(sessionData["userId"]);
+                var username = sessionData["username"]?.ToString();
+                var userGroupId = Convert.ToInt32(sessionData["userGroupId"]);
+
+                var authResponse = new XenforoAuthResponseDTO
+                {
+                    Success = true,
+                    User = new XenforoAuthResponseDTO.XenforoUserDTO
+                    {
+                        UserId = userId,
+                        UserName = username,
+                        UserGroupId = userGroupId,
+                    },
+                    SessionId = sessionIdHex
+                };
+
+                return ServiceResult<XenforoAuthResponseDTO>.Success(authResponse);
+            }
+            catch (Exception ex)
+            {
+                var error = ApplicationError.CreateExceptionError(
+                    ErrorDefinitions.InternalServerError,
+                    correlationId,
+                    ex.Message
+                );
+                return ServiceResult<XenforoAuthResponseDTO>.Exception(error);
+            }
+        }
+
+        // ===========================
+        // 🔐 Helpers
+        // ===========================
 
         private bool VerifyPassword(string authDataStr, string password)
         {
@@ -149,51 +331,6 @@ namespace Infrastructure.Services
                 ["trophyChecked"] = true,
                 ["previousActivity"] = nowUnix
             };
-        }
-
-        private async Task InsertOrUpdateSessionAsync(MySqlConnection connection, byte[] sessionIdBytes, string serializedSessionData, long expiryUnix)
-        {
-            const string insertSessionQuery = @"
-        INSERT INTO xf_session (session_id, session_data, expiry_date)
-        VALUES (@sessionId, @sessionData, @expiryDate)
-        ON DUPLICATE KEY UPDATE session_data = @sessionData, expiry_date = @expiryDate;
-    ";
-
-            await using var cmd = new MySqlCommand(insertSessionQuery, connection);
-            cmd.Parameters.Add("@sessionId", MySqlDbType.VarBinary).Value = sessionIdBytes;
-            cmd.Parameters.AddWithValue("@sessionData", serializedSessionData);
-            cmd.Parameters.AddWithValue("@expiryDate", expiryUnix);
-            await cmd.ExecuteNonQueryAsync();
-        }
-
-        private async Task InsertOrUpdateSessionActivityAsync(MySqlConnection connection, int userId, string clientIp, long nowUnix)
-        {
-            const string insertActivityQuery = @"
-        INSERT INTO xf_session_activity (user_id, unique_key, ip, controller_name, controller_action, view_state, robot_key, params, view_date)
-        VALUES (@userId, @uniqueKey, @ip, @controllerName, @controllerAction, 'valid', '', '', @viewDate)
-        ON DUPLICATE KEY UPDATE
-            user_id = VALUES(user_id),
-            ip = VALUES(ip),
-            controller_name = VALUES(controller_name),
-            controller_action = VALUES(controller_action),
-            view_state = VALUES(view_state),
-            robot_key = VALUES(robot_key),
-            params = VALUES(params),
-            view_date = VALUES(view_date);
-    ";
-
-            var ipAddress = string.IsNullOrEmpty(clientIp) ? "0.0.0.0" : clientIp;
-            var ipBytes = IPAddress.Parse(ipAddress).GetAddressBytes();
-            var ipPacked = ipBytes.Length == 4 ? ipBytes : new byte[] { 0, 0, 0, 0 };
-
-            await using var cmd = new MySqlCommand(insertActivityQuery, connection);
-            cmd.Parameters.AddWithValue("@userId", userId);
-            cmd.Parameters.Add("@uniqueKey", MySqlDbType.VarBinary).Value = ipPacked;
-            cmd.Parameters.Add("@ip", MySqlDbType.VarBinary).Value = ipPacked;
-            cmd.Parameters.AddWithValue("@controllerName", "XF\\Pub\\Controller\\ForumController");
-            cmd.Parameters.AddWithValue("@controllerAction", "List");
-            cmd.Parameters.AddWithValue("@viewDate", nowUnix);
-            await cmd.ExecuteNonQueryAsync();
         }
     }
 }

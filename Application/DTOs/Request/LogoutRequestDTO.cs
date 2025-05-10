@@ -1,13 +1,11 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿
+using System.ComponentModel.DataAnnotations;
 
 namespace Application.DTOs.Request
 {
     public class LogoutRequestDTO
     {
-        public string RefreshToken { get; set; } = null!;
+        [Required(ErrorMessage = "SessionId is required.")]
+        public string SessionId { get; set; } = null!;
     }
 }

@@ -7,18 +7,13 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Remove="Features\License\**" />
-    <EmbeddedResource Remove="Features\License\**" />
-    <None Remove="Features\License\**" />
+    <Compile Remove="Mapping\**" />
+    <EmbeddedResource Remove="Mapping\**" />
+    <None Remove="Mapping\**" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Domain\Domain.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Folder Include="Features\Xenforo\LicensePlan\Command\" />
-    <Folder Include="Mapping\" />
   </ItemGroup>
 
   <ItemGroup>

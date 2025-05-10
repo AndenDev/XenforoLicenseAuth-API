@@ -10,6 +10,14 @@ namespace API.MiddleWare
         private readonly ICryptoService _cryptoService;
         private readonly IEd25519SigningService _signingService;
 
+
+        private readonly HashSet<PathString> _excludedPaths = new()
+        {
+            ApiRoutes.AuthRoutes.Login,
+            ApiRoutes.HomeRoutes.Summary        
+
+        };
+
         public SecureResponseMiddleware(
             RequestDelegate next,
             ICryptoService cryptoService,
@@ -23,11 +31,8 @@ namespace API.MiddleWare
         public async Task Invoke(HttpContext context)
         {
             var path = context.Request.Path;
-            var expected = ApiRoutes.AuthRoutes.Login.StartsWith("/")
-                ? ApiRoutes.AuthRoutes.Login
-                : "/" + ApiRoutes.AuthRoutes.Login;
 
-            if (path.StartsWithSegments(expected, StringComparison.OrdinalIgnoreCase))
+            if (_excludedPaths.Any(p => path.StartsWithSegments(p, StringComparison.OrdinalIgnoreCase)))
             {
                 await _next(context);
                 return;
@@ -57,12 +62,7 @@ namespace API.MiddleWare
             context.Response.Body = originalBody;
             context.Response.ContentType = "application/json";
 
-            // ✅ either write full buffer (auto content-length):
             await context.Response.Body.WriteAsync(jsonBytes);
-
-            // OR explicitly set Content-Length (optional):
-            // context.Response.ContentLength = jsonBytes.Length;
-            // await context.Response.Body.WriteAsync(jsonBytes, 0, jsonBytes.Length);
         }
     }
 }

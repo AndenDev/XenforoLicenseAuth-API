@@ -1,8 +1,10 @@
 ﻿using System.Collections;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using Application.Interfaces;
-using MySqlConnector;
+using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
 using Shared.Utils;
 
 namespace API.MiddleWare
@@ -10,97 +12,105 @@ namespace API.MiddleWare
     public class SessionMiddleware
     {
         private readonly RequestDelegate _next;
-        private readonly IMySqlDatabaseConnection _dbConnection;
         private readonly PHPSerializer _serializer = new PHPSerializer();
+        private readonly HashSet<PathString> _excludedPaths = new()
+        {
+            ApiRoutes.AuthRoutes.Login
+        };
 
-        public SessionMiddleware(RequestDelegate next, IMySqlDatabaseConnection dbConnection)
+        public SessionMiddleware(RequestDelegate next)
         {
             _next = next;
-            _dbConnection = dbConnection;
+
         }
 
         public async Task InvokeAsync(HttpContext context)
         {
             var path = context.Request.Path;
-            var expected = ApiRoutes.AuthRoutes.Login.StartsWith("/")
-                ? ApiRoutes.AuthRoutes.Login
-                : "/" + ApiRoutes.AuthRoutes.Login;
 
-            if (path.StartsWithSegments(expected, StringComparison.OrdinalIgnoreCase))
+            if (_excludedPaths.Any(p => path.StartsWithSegments(p, StringComparison.OrdinalIgnoreCase)))
             {
                 await _next(context);
                 return;
             }
+            var unitOfWork = context.RequestServices.GetRequiredService<IUnitOfWork>();
 
             var sessionIdHex = context.Request.Headers["X-Session-Id"].FirstOrDefault();
             if (string.IsNullOrEmpty(sessionIdHex) || sessionIdHex.Length != 64 || !sessionIdHex.All("0123456789abcdefABCDEF".Contains))
             {
-                context.Response.StatusCode = 401;
-                await context.Response.WriteAsync("Invalid or missing session ID.");
+                await RespondUnauthorizedAsync(context, "Invalid or missing session ID.");
                 return;
             }
 
-            var sessionIdBytes = Enumerable.Range(0, sessionIdHex.Length / 2)
-                .Select(x => Convert.ToByte(sessionIdHex.Substring(x * 2, 2), 16))
-                .ToArray();
+            var sessionIdBytes = HexUtils.StringToByteArray(sessionIdHex);
 
-            await using var connection = await _dbConnection.CreateOpenConnectionAsync();
-            var query = @"
-                SELECT 
-                    s.session_data, 
-                    s.expiry_date, 
-                    u.username, 
-                    ug.title AS user_group_name
-                FROM xf_session s
-                JOIN xf_user u ON (CAST(JSON_EXTRACT(CONVERT(s.session_data USING utf8), '$.userId') AS UNSIGNED) = u.user_id)
-                JOIN xf_user_group ug ON u.user_group_id = ug.user_group_id
-                WHERE s.session_id = @sessionId
-                LIMIT 1;
-            ";
+            var session = await unitOfWork.Repository<Domain.Entities.Session>()
+                .GetAsync(s => s.SessionId == sessionIdBytes);
 
-            await using var cmd = new MySqlCommand(query, connection);
-            cmd.Parameters.Add("@sessionId", MySqlDbType.VarBinary).Value = sessionIdBytes;
-
-            await using var reader = await cmd.ExecuteReaderAsync();
-            if (!await reader.ReadAsync())
+            if (session == null)
             {
-                context.Response.StatusCode = 401;
-                await context.Response.WriteAsync("Invalid session.");
+                await RespondUnauthorizedAsync(context, "Invalid session.");
                 return;
             }
 
-            var expiryUnix = reader.GetInt64("expiry_date");
             var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            if (expiryUnix < nowUnix)
+            if (session.ExpiryDate < nowUnix)
             {
-                context.Response.StatusCode = 401;
-                await context.Response.WriteAsync("Session expired.");
+                await RespondUnauthorizedAsync(context, "Session expired.");
                 return;
             }
 
-            var sessionBlob = (byte[])reader["session_data"];
-            var serializedData = Encoding.UTF8.GetString(sessionBlob);
+            var serializedData = Encoding.UTF8.GetString(session.SessionData);
             var sessionData = _serializer.Deserialize(serializedData) as Hashtable;
-            var userId = (int)(sessionData?["userId"] ?? 0);
-            var username = sessionData?["username"]?.ToString() ?? "";
-            var groupName = reader.GetString("user_group_name");
 
-            if (userId == 0)
+            if (sessionData == null || !sessionData.ContainsKey("userId"))
             {
-                context.Response.StatusCode = 401;
-                await context.Response.WriteAsync("Invalid session data.");
+                await RespondUnauthorizedAsync(context, "Session data is corrupted or missing userId.");
                 return;
             }
+
+            int userId;
+            try
+            {
+                userId = Convert.ToInt32(sessionData["userId"]);
+            }
+            catch
+            {
+                await RespondUnauthorizedAsync(context, "Session data userId type mismatch.");
+                return;
+            }
+
+            var user = await unitOfWork.Repository<Domain.Entities.User>()
+                .GetAsync(
+                    u => u.UserId == userId,
+                    include: q => q.Include(u => u.UserGroup)
+                );
+
+            if (user == null)
+            {
+                await RespondUnauthorizedAsync(context, "User not found.");
+                return;
+            }
+
             var claims = new List<Claim>
             {
-                new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
-                new Claim(ClaimTypes.Name, username),
-                new Claim(ClaimTypes.Role, groupName) 
+                new Claim(ClaimTypes.NameIdentifier, user.UserId.ToString()),
+                new Claim(ClaimTypes.Name, user.Username),
+                new Claim(ClaimTypes.Role, user.UserGroup?.Title ?? string.Empty)
             };
 
             var identity = new ClaimsIdentity(claims, "XenForoSession");
             context.User = new ClaimsPrincipal(identity);
+
             await _next(context);
+        }
+
+        private async Task RespondUnauthorizedAsync(HttpContext context, string message)
+        {
+            context.Response.StatusCode = 401;
+            context.Response.ContentType = "application/json";
+            var response = JsonSerializer.Serialize(new { error = message });
+            await context.Response.WriteAsync(response);
         }
     }
 }

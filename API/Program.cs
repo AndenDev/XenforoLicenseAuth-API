@@ -7,6 +7,10 @@ using MediatR;
 using Shared.Constant;
 using Microsoft.AspNetCore.Mvc;
 using API.Middleware;
+using Microsoft.AspNetCore.Authentication;
+using API.Authentication;
+using CorrelationId.DependencyInjection;
+using CorrelationId;
 
 
 var builder = WebApplication.CreateBuilder(args);
@@ -15,18 +19,22 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddCorsPolicy();
 builder.Services.AddApiVersioningConfig();
-builder.Services.AddSwaggerConfig();
-builder.Services.AddJwtAuthentication(builder.Configuration);
 builder.Services.AddInfrastructureServices(builder.Configuration);
 builder.Services.AddMediatR(typeof(Application.AssemblyReference).Assembly);
+builder.Services.AddAutoMapper(typeof(Program));
 
+builder.Services.AddDefaultCorrelationId();
+builder.Services.AddSwaggerDocumentation();
+
+builder.Services.AddAuthentication("XenForoSession")
+    .AddScheme<AuthenticationSchemeOptions, DummyAuthHandler>("XenForoSession", options => { });
 
 builder.Services.AddAuthorization();
 builder.Services.AddControllers();
 
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+
 
 
 var app = builder.Build();
@@ -39,18 +47,14 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-app.UseCors(policy =>
-    policy.AllowAnyOrigin()
-          .AllowAnyHeader()
-          .AllowAnyMethod());
+app.UseCors("AllowAll");
 
+app.UseCorrelationId();
 app.UseMiddleware<GlobalExceptionHandlingMiddleware>();
-
-app.UseAuthentication();                         
+app.UseAuthentication();
+app.UseMiddleware<SessionMiddleware>();
 app.UseAuthorization();
 
-
-//app.UseMiddleware<SecureResponseMiddleware>();
-
+app.UseMiddleware<SecureResponseMiddleware>(); 
 app.MapControllers();
 app.Run();

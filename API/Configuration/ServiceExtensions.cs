@@ -4,6 +4,7 @@ using Microsoft.OpenApi.Models;
 using MediatR;
 using System.Reflection;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using API.Configuration.Swagger;
 
 namespace API.Configuration
 {
@@ -32,57 +33,26 @@ namespace API.Configuration
 
             return services;
         }
-        public static IServiceCollection AddSwaggerConfig(this IServiceCollection services)
+        public static IServiceCollection AddSwaggerDocumentation(this IServiceCollection services)
         {
             services.AddSwaggerGen(c =>
             {
-                c.SwaggerDoc("v1", new OpenApiInfo { Title = "LicenseAuth API", Version = "v1" });
-
-                c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+                c.SwaggerDoc("v1", new OpenApiInfo
                 {
-                    Name = "Authorization",
-                    Type = SecuritySchemeType.Http,
-                    Scheme = "Bearer",
-                    BearerFormat = "JWT",
-                    In = ParameterLocation.Header,
-                    Description = "Enter 'Bearer {token}'"
+                    Title = "XenforoLicenseAuth API",
+                    Version = "v1",
+                    Description = "API for XenForo license authentication"
                 });
 
-                c.AddSecurityRequirement(new OpenApiSecurityRequirement
+                c.OperationFilter<AddSessionHeaderParameter>();
+
+                var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+                var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+                if (File.Exists(xmlPath))
                 {
-                    [new OpenApiSecurityScheme
-                    {
-                        Reference = new OpenApiReference
-                        {
-                            Type = ReferenceType.SecurityScheme,
-                            Id = "Bearer"
-                        }
-                    }
-                   ] = Array.Empty<string>()
-                });
+                    c.IncludeXmlComments(xmlPath);
+                }
             });
-
-            return services;
-        }
-        public static IServiceCollection AddJwtAuthentication(this IServiceCollection services, IConfiguration configuration)
-        {
-            var jwtSettings = configuration.GetSection("Jwt");
-            var secretKey = jwtSettings["Secret"];
-
-            services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-                .AddJwtBearer(options =>
-                {
-                    options.RequireHttpsMetadata = false;
-                    options.SaveToken = true;
-                    options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
-                    {
-                        ValidateLifetime = true,
-                        ValidateIssuerSigningKey = true,
-                        ValidateIssuer = false, 
-                        ValidateAudience = false, 
-                        IssuerSigningKey = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(secretKey))
-                    };
-                });
 
             return services;
         }
