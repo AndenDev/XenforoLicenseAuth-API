@@ -22,7 +22,7 @@ builder.Services.AddApiVersioningConfig();
 builder.Services.AddInfrastructureServices(builder.Configuration);
 builder.Services.AddMediatR(typeof(Application.AssemblyReference).Assembly);
 builder.Services.AddAutoMapper(typeof(Program));
-
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddDefaultCorrelationId();
 builder.Services.AddSwaggerDocumentation();
 
@@ -47,7 +47,8 @@ if (app.Environment.IsDevelopment())
 }
 
 app.UseHttpsRedirection();
-app.UseCors("AllowAll");
+app.UseCors("AllowFrontend");
+
 
 app.UseCorrelationId();
 app.UseMiddleware<GlobalExceptionHandlingMiddleware>();

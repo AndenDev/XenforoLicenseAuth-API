@@ -1,49 +1,51 @@
-﻿using Application.Interfaces;
-using Microsoft.AspNetCore.Mvc;
-using API.ApiRoutes;
-using Application.DTOs.Request;
-using Application.DTOs.Response;
+﻿using Application.Common.Responses;
 using AutoMapper;
 using CorrelationId.Abstractions;
-using Application.Common.Responses;
+using MediatR;
+using Microsoft.AspNetCore.Mvc;
+using API.ApiRoutes;
+using Application.Features.Auth.Login.Command;
+using Application.Features.Auth.Logout.Command;
+using Application.Features.Auth.ValidateSession.Command;
 
 namespace API.Controllers
 {
     [ApiController]
     public class AuthController : BaseController
     {
-        private readonly IXenforoAuthService _authService;
+        private readonly IMediator _mediator;
 
         public AuthController(
-            IXenforoAuthService authService,
+            IMediator mediator,
             IMapper mapper,
             ICorrelationContextAccessor correlationContextAccessor
         ) : base(mapper, correlationContextAccessor)
         {
-            _authService = authService;
+            _mediator = mediator;
         }
 
         [HttpPost(AuthRoutes.Login)]
-        public async Task<ActionResult<ApiResponse<XenforoAuthResponseDTO>>> Login([FromBody] LoginRequestDTO request)
+        public async Task<ActionResult<ApiResponse<LoginViewModel>>> Login([FromBody] LoginCommand command)
         {
-            var result = await _authService.AuthenticateUserAsync(
-                request.Username, request.Password, request.IPAddress);
-
-            return HandleResponse(result);
+            var result = await _mediator.Send(command); 
+            return HandleResponse(result);             
         }
+
 
         [HttpPost(AuthRoutes.Logout)]
-        public async Task<ActionResult<ApiResponse<object>>> Logout([FromBody] LogoutRequestDTO request)
+        public async Task<ActionResult<ApiResponse<LogoutViewModel>>> Logout([FromBody] LogoutCommand command)
         {
-            var result = await _authService.LogoutAsync(request.SessionId);
+            var result = await _mediator.Send(command); 
+            return HandleResponse(result);              
+        }
+
+
+        [HttpPost(AuthRoutes.ValidateSession)]
+        public async Task<ActionResult<ApiResponse<ValidateSessionViewModel>>> ValidateSession([FromBody] ValidateSessionCommand command)
+        {
+            var result = await _mediator.Send(command);
             return HandleResponse(result);
         }
 
-        [HttpPost(AuthRoutes.ValidateSession)]
-        public async Task<ActionResult<ApiResponse<XenforoAuthResponseDTO>>> ValidateSession([FromBody] ValidateSessionRequestDTO request)
-        {
-            var result = await _authService.ValidateSessionAsync(request.SessionId, request.IPAddress);
-            return HandleResponse(result);
-        }
     }
 }

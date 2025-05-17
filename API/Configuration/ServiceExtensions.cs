@@ -14,10 +14,13 @@ namespace API.Configuration
         {
             services.AddCors(options =>
             {
-                options.AddPolicy("AllowAll",
-                    builder => builder.AllowAnyOrigin()
-                                      .AllowAnyMethod()
-                                      .AllowAnyHeader());
+                options.AddPolicy("AllowFrontend", builder =>
+                {
+                    builder.WithOrigins("http://localhost:3000") // ✅ specify frontend origin
+                           .AllowAnyHeader()
+                           .AllowAnyMethod()
+                           .AllowCredentials(); // ✅ allow sending cookies
+                });
             });
             return services;
         }

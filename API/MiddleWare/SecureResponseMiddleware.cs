@@ -1,6 +1,7 @@
 ﻿using Application.Interfaces;
 using System.Text.Json;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace API.MiddleWare
 {
@@ -14,7 +15,9 @@ namespace API.MiddleWare
         private readonly HashSet<PathString> _excludedPaths = new()
         {
             ApiRoutes.AuthRoutes.Login,
-            ApiRoutes.HomeRoutes.Summary        
+            ApiRoutes.AuthRoutes.Logout,
+            ApiRoutes.AuthRoutes.ValidateSession,
+            ApiRoutes.UserRoutes.Profile
 
         };
 
@@ -32,7 +35,7 @@ namespace API.MiddleWare
         {
             var path = context.Request.Path;
 
-            if (_excludedPaths.Any(p => path.StartsWithSegments(p, StringComparison.OrdinalIgnoreCase)))
+            if (IsExcludedPath(path))
             {
                 await _next(context);
                 return;
@@ -49,7 +52,7 @@ namespace API.MiddleWare
 
             var encryptedPayload = _cryptoService.Encrypt(plainResponse);
 
-            var jsonString = JsonSerializer.Serialize(encryptedPayload); // outputs: "base64string"
+            var jsonString = JsonSerializer.Serialize(encryptedPayload); 
 
             var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
             var signature = _signingService.Sign(timestamp + encryptedPayload);
@@ -63,6 +66,19 @@ namespace API.MiddleWare
             context.Response.ContentType = "application/json";
 
             await context.Response.Body.WriteAsync(jsonBytes);
+        }
+        private static readonly string[] _excludedRoutePrefixes = new[]
+         {
+            "/api/auth",
+            "/api/user"
+        };
+        private static readonly Regex _excludedPathRegex = new(
+            $"^({string.Join("|", _excludedRoutePrefixes.Select(Regex.Escape))})(/.*)?$",
+            RegexOptions.IgnoreCase | RegexOptions.Compiled
+        );
+        private bool IsExcludedPath(PathString path)
+        {
+            return _excludedPathRegex.IsMatch(path);
         }
     }
 }

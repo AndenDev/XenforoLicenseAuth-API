@@ -202,6 +202,30 @@ namespace API.Controllers
                 error: errorDetails,
                 statusCode: errorStatusCode));
         }
+        public ActionResult<ApiResponse<T>> HandleResponse<T>(T result, bool isCreation = false)
+        {
+            if (result == null)
+            {
+                var error = new ProblemDetails
+                {
+                    Title = "Not Found",
+                    Detail = "Resource was not found.",
+                    Status = (int)HttpStatusCode.NotFound
+                };
+
+                return NotFound(ApiResponse<T>.CreateError(default, error, HttpStatusCode.NotFound));
+            }
+
+            if (isCreation)
+            {
+                return new CreatedResult(
+                    string.Empty,
+                    ApiResponse<T>.CreateSuccess(result, "Created", HttpStatusCode.Created));
+            }
+
+            return Ok(ApiResponse<T>.CreateSuccess(result, "Success", HttpStatusCode.OK));
+        }
+
 
         private ActionResult<ApiResponse<TApiResponse>> HandleActionResult<TServiceResult, TApiResponse>(
             ServiceResult<TServiceResult> result,

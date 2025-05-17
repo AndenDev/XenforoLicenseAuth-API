@@ -1,5 +1,6 @@
 ﻿using Application.Interfaces;
-using Infrastructure.Repositories;
+using Application.Repository;
+using Infrastructure.Repository;
 using Infrastructure.Services;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -17,6 +18,7 @@ namespace Infrastructure.Configuration
             services.AddMemoryCache();
 
             services.AddScoped(typeof(IGenericRepository<>), typeof(GenericRepository<>));
+            services.AddScoped(typeof(IPaginatedGenericRepository<>), typeof(PaginatedGenericRepository<>));
             services.AddScoped<IUnitOfWork, UnitOfWork>();
 
 
@@ -27,7 +29,6 @@ namespace Infrastructure.Configuration
                 )
             );
 
-            services.AddScoped<IXenforoAuthService, XenForoAuthService>();
             return services;
         }
     }

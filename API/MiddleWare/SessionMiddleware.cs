@@ -1,9 +1,12 @@
 ﻿using System.Collections;
+using System.Net;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using Application.Interfaces;
+using Domain.Entities;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Shared.Utils;
 
@@ -33,7 +36,6 @@ namespace API.MiddleWare
                 await _next(context);
                 return;
             }
-            var unitOfWork = context.RequestServices.GetRequiredService<IUnitOfWork>();
 
             var sessionIdHex = context.Request.Headers["X-Session-Id"].FirstOrDefault();
             if (string.IsNullOrEmpty(sessionIdHex) || sessionIdHex.Length != 64 || !sessionIdHex.All("0123456789abcdefABCDEF".Contains))
@@ -44,73 +46,89 @@ namespace API.MiddleWare
 
             var sessionIdBytes = HexUtils.StringToByteArray(sessionIdHex);
 
-            var session = await unitOfWork.Repository<Domain.Entities.Session>()
-                .GetAsync(s => s.SessionId == sessionIdBytes);
-
-            if (session == null)
-            {
-                await RespondUnauthorizedAsync(context, "Invalid session.");
-                return;
-            }
-
-            var nowUnix = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            if (session.ExpiryDate < nowUnix)
-            {
-                await RespondUnauthorizedAsync(context, "Session expired.");
-                return;
-            }
-
-            var serializedData = Encoding.UTF8.GetString(session.SessionData);
-            var sessionData = _serializer.Deserialize(serializedData) as Hashtable;
-
-            if (sessionData == null || !sessionData.ContainsKey("userId"))
-            {
-                await RespondUnauthorizedAsync(context, "Session data is corrupted or missing userId.");
-                return;
-            }
-
-            int userId;
             try
             {
-                userId = Convert.ToInt32(sessionData["userId"]);
+                var unitOfWork = context.RequestServices.GetRequiredService<IUnitOfWork>();
+                var session = await unitOfWork.Repository<Session>()
+                    .GetAsync(s => s.SessionId == sessionIdBytes);
+
+                if (session == null || session.ExpiryDate < DateTimeOffset.UtcNow.ToUnixTimeSeconds())
+                {
+                    await RespondUnauthorizedAsync(context, "Invalid or expired session.");
+                    return;
+                }
+
+                var rawSessionData = Encoding.UTF8.GetString(session.SessionData);
+                Hashtable sessionData;
+
+                try
+                {
+                    sessionData = _serializer.Deserialize(rawSessionData) as Hashtable ?? throw new FormatException("Session deserialization returned null.");
+                }
+                catch
+                {
+                    await RespondUnauthorizedAsync(context, "Malformed session data.");
+                    return;
+                }
+
+                if (!sessionData.ContainsKey("userId") || !sessionData.ContainsKey("userGroupName"))
+                {
+                    await RespondUnauthorizedAsync(context, "Session missing required fields.");
+                    return;
+                }
+
+                var userId = sessionData["userId"];
+                var userGroupName = sessionData["userGroupName"]?.ToString();
+
+                if (string.IsNullOrWhiteSpace(userGroupName))
+                {
+                    await RespondUnauthorizedAsync(context, "Session missing group.");
+                    return;
+                }
+
+                var claims = new List<Claim>
+                {
+                    new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
+                    new Claim(ClaimTypes.Role, userGroupName)
+                };
+
+                var identity = new ClaimsIdentity(claims, "XenForoSession");
+                context.User = new ClaimsPrincipal(identity);
+
+                await _next(context);
             }
             catch
             {
-                await RespondUnauthorizedAsync(context, "Session data userId type mismatch.");
-                return;
+                await RespondUnauthorizedAsync(context, "Session error.");
             }
-
-            var user = await unitOfWork.Repository<Domain.Entities.User>()
-                .GetAsync(
-                    u => u.UserId == userId,
-                    include: q => q.Include(u => u.UserGroup)
-                );
-
-            if (user == null)
-            {
-                await RespondUnauthorizedAsync(context, "User not found.");
-                return;
-            }
-
-            var claims = new List<Claim>
-            {
-                new Claim(ClaimTypes.NameIdentifier, user.UserId.ToString()),
-                new Claim(ClaimTypes.Name, user.Username),
-                new Claim(ClaimTypes.Role, user.UserGroup?.Title ?? string.Empty)
-            };
-
-            var identity = new ClaimsIdentity(claims, "XenForoSession");
-            context.User = new ClaimsPrincipal(identity);
-
-            await _next(context);
         }
+
 
         private async Task RespondUnauthorizedAsync(HttpContext context, string message)
         {
-            context.Response.StatusCode = 401;
-            context.Response.ContentType = "application/json";
-            var response = JsonSerializer.Serialize(new { error = message });
+            var correlationId = context.TraceIdentifier;
+            var problemDetails = new ProblemDetails
+            {
+                Type = "https://httpstatuses.com/401",
+                Title = "Unauthorized",
+                Status = StatusCodes.Status401Unauthorized,
+                Detail = message,
+                Instance = context.Request.Path,
+                Extensions = { ["correlationId"] = correlationId }
+            };
+
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            context.Response.ContentType = "application/problem+json";
+
+            var jsonOptions = new JsonSerializerOptions
+            {
+                PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+                WriteIndented = false
+            };
+
+            var response = JsonSerializer.Serialize(problemDetails, jsonOptions);
             await context.Response.WriteAsync(response);
         }
+
     }
 }
